@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleGenAI, LiveSession, LiveServerMessage, Modality } from "@google/genai";
 import { Segment } from './types';
@@ -73,7 +74,7 @@ function encode(bytes: Uint8Array): string {
 }
 
 const CONTEXT_WINDOW_SIZE = 5; // Number of recent segments to send for contextual translation
-const TRANSLATION_DEBOUNCE_MS = 1500; // Wait 1.5s after speech stops to translate
+const TRANSLATION_DEBOUNCE_MS = 2500; // Wait 2.5s after speech stops for contextual re-translation
 const AUDIO_BUFFER_SIZE = 4096; // Buffer size for the audio worklet
 
 const App: React.FC = () => {
@@ -86,7 +87,7 @@ const App: React.FC = () => {
     const mediaStreamRef = useRef<MediaStream | null>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
     const workletNodeRef = useRef<AudioWorkletNode | null>(null);
-    const translationTimerRef = useRef<number | null>(null);
+    const contextualTranslationTimerRef = useRef<number | null>(null);
     const isInterruptedRef = useRef(false);
 
     // Refs for state management to avoid stale closures and optimize updates
@@ -99,17 +100,46 @@ const App: React.FC = () => {
     const latestTranscriptionTextRef = useRef('');
     const animationFrameRef = useRef<number | null>(null);
     
-    const processTranslation = useCallback(async () => {
+    // Translates a single segment for immediate feedback
+    const translateSingleSegment = useCallback(async (segment: Segment) => {
+        try {
+            const translations = await translateText([segment.text], targetLanguageRef.current);
+            if (translations.length > 0) {
+                setTranslationSegments(prev => {
+                    const newSegments = [...prev];
+                    const index = newSegments.findIndex(s => s.id === segment.id);
+                    if (index !== -1) {
+                        newSegments[index] = { ...newSegments[index], text: translations[0], isFinal: true };
+                    }
+                    return newSegments;
+                });
+            }
+        } catch (error) {
+            console.error("Single segment translation failed:", error);
+            setTranslationSegments(prev => {
+                const newSegments = [...prev];
+                const index = newSegments.findIndex(s => s.id === segment.id);
+                if (index !== -1) {
+                    newSegments[index] = { ...newSegments[index], text: '[Error]', isFinal: true };
+                }
+                return newSegments;
+            });
+        }
+    }, []);
+
+    // Translates a batch of recent segments for contextual accuracy
+    const processContextualTranslation = useCallback(async () => {
         const segmentsToTranslate = transcriptionSegmentsRef.current
             .slice(-CONTEXT_WINDOW_SIZE)
             .filter(s => s.isFinal);
 
-        if (segmentsToTranslate.length === 0) return;
+        if (segmentsToTranslate.length < 2) return; // Only run for more than one segment
 
         const segmentTexts = segmentsToTranslate.map(s => s.text);
         const segmentIds = segmentsToTranslate.map(s => s.id);
 
         try {
+            console.log(`Requesting contextual translation for ${segmentTexts.length} segments.`);
             const translations = await translateText(segmentTexts, targetLanguageRef.current);
             
             if (translations.length > 0) {
@@ -129,8 +159,33 @@ const App: React.FC = () => {
                 });
             }
         } catch (error) {
-            console.error("Translation failed:", error);
+            console.error("Contextual translation failed:", error);
         }
+    }, []);
+
+    // Fix: Moved stopTranscription before establishLiveSession to fix "used before declaration" error.
+    const stopTranscription = useCallback(() => {
+        setIsRecording(false);
+        if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+            animationFrameRef.current = null;
+        }
+        if (contextualTranslationTimerRef.current) {
+            clearTimeout(contextualTranslationTimerRef.current);
+            contextualTranslationTimerRef.current = null;
+        }
+        mediaStreamRef.current?.getTracks().forEach(track => track.stop());
+        sessionPromiseRef.current?.then(session => session.close());
+        workletNodeRef.current?.port.close();
+        workletNodeRef.current?.disconnect();
+        if (audioContextRef.current?.state !== 'closed') {
+             audioContextRef.current?.close().catch(e => console.error("Error closing AudioContext:", e));
+        }
+       
+        mediaStreamRef.current = null;
+        sessionPromiseRef.current = null;
+        workletNodeRef.current = null;
+        audioContextRef.current = null;
     }, []);
 
     const establishLiveSession = useCallback(async () => {
@@ -191,11 +246,15 @@ const App: React.FC = () => {
                              setTranslationSegments(prev => [
                                ...prev.filter(s => s.isFinal), { id: finalizedSegment.id, text: '...', isFinal: false }
                             ]);
+                            
+                            // 1. Trigger immediate translation for the new sentence
+                            translateSingleSegment(finalizedSegment);
 
-                            if (translationTimerRef.current) {
-                                clearTimeout(translationTimerRef.current);
+                            // 2. Reset the debounced timer for contextual re-translation
+                            if (contextualTranslationTimerRef.current) {
+                                clearTimeout(contextualTranslationTimerRef.current);
                             }
-                            translationTimerRef.current = window.setTimeout(processTranslation, TRANSLATION_DEBOUNCE_MS);
+                            contextualTranslationTimerRef.current = window.setTimeout(processContextualTranslation, TRANSLATION_DEBOUNCE_MS);
                         }
                         latestTranscriptionTextRef.current = '';
                     }
@@ -220,35 +279,10 @@ const App: React.FC = () => {
             console.log("Live session connection successful.");
         } catch (err) {
             console.error("Failed to connect live session:", err);
-            // Stop fully if connection fails
-            // This needs a proper stop function, let's call the main one
+            stopTranscription();
         }
 
-    }, [processTranslation]);
-
-    const stopTranscription = useCallback(() => {
-        setIsRecording(false);
-        if (animationFrameRef.current) {
-            cancelAnimationFrame(animationFrameRef.current);
-            animationFrameRef.current = null;
-        }
-        if (translationTimerRef.current) {
-            clearTimeout(translationTimerRef.current);
-            translationTimerRef.current = null;
-        }
-        mediaStreamRef.current?.getTracks().forEach(track => track.stop());
-        sessionPromiseRef.current?.then(session => session.close());
-        workletNodeRef.current?.port.close();
-        workletNodeRef.current?.disconnect();
-        if (audioContextRef.current?.state !== 'closed') {
-             audioContextRef.current?.close().catch(e => console.error("Error closing AudioContext:", e));
-        }
-       
-        mediaStreamRef.current = null;
-        sessionPromiseRef.current = null;
-        workletNodeRef.current = null;
-        audioContextRef.current = null;
-    }, []);
+    }, [processContextualTranslation, translateSingleSegment, stopTranscription]);
 
     const startTranscription = useCallback(async () => {
         if (!process.env.API_KEY) {
@@ -318,6 +352,13 @@ const App: React.FC = () => {
             }
         };
     }, [isRecording, stopTranscription]);
+    
+    // Remove the ApiKeySelector logic
+    if (process.env.API_KEY === undefined) {
+         // The initial check in startTranscription will handle the alert.
+         // We render the main app structure but functionality will be blocked.
+    }
+
 
     return (
         <div className="flex flex-col h-screen font-sans">
