@@ -1,0 +1,7 @@
+{
+  "name": "Real-Time Transcription and Translation",
+  "description": "An application that transcribes audio from the microphone in real-time and provides a simultaneous translation into a selected language, with contextual re-translation for improved accuracy.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
