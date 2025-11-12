@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleGenAI, LiveSession, LiveServerMessage, Modality } from "@google/genai";
 import { Segment } from './types';
 import { translateText } from './services/geminiService';
-import ApiKeySelector from './components/ApiKeySelector';
 import Controls from './components/Controls';
 import TextPanel from './components/TextPanel';
 
@@ -78,7 +77,6 @@ const TRANSLATION_DEBOUNCE_MS = 1500; // Wait 1.5s after speech stops to transla
 const AUDIO_BUFFER_SIZE = 4096; // Buffer size for the audio worklet
 
 const App: React.FC = () => {
-    const [apiKeyReady, setApiKeyReady] = useState(false);
     const [isRecording, setIsRecording] = useState(false);
     const [targetLanguage, setTargetLanguage] = useState('Spanish');
     const [transcriptionSegments, setTranscriptionSegments] = useState<Segment[]>([]);
@@ -100,15 +98,6 @@ const App: React.FC = () => {
     // Refs for performance optimization
     const latestTranscriptionTextRef = useRef('');
     const animationFrameRef = useRef<number | null>(null);
-
-    useEffect(() => {
-        const checkApiKey = async () => {
-            if (window.aistudio && await window.aistudio.hasSelectedApiKey()) {
-                setApiKeyReady(true);
-            }
-        };
-        checkApiKey();
-    }, []);
     
     const processTranslation = useCallback(async () => {
         const segmentsToTranslate = transcriptionSegmentsRef.current
@@ -263,7 +252,7 @@ const App: React.FC = () => {
 
     const startTranscription = useCallback(async () => {
         if (!process.env.API_KEY) {
-            alert("API Key not found. Please select an API key.");
+            alert("Gemini API Key not found. Please create a .env.local file and set the API_KEY variable.");
             return;
         }
 
@@ -329,10 +318,6 @@ const App: React.FC = () => {
             }
         };
     }, [isRecording, stopTranscription]);
-
-    if (!apiKeyReady) {
-        return <ApiKeySelector onApiKeySelected={() => setApiKeyReady(true)} />;
-    }
 
     return (
         <div className="flex flex-col h-screen font-sans">
